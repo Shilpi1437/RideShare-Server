@@ -71,6 +71,7 @@ const checkout = async (req, res) => {
 
 const paymentWebhook = async (request, response) => {
   const sig = request.headers["stripe-signature"];
+  console.log("Webhook received with signature:", sig);
   let event;
   //console.log('request.body',request.body);
   try {
@@ -79,60 +80,64 @@ const paymentWebhook = async (request, response) => {
       sig,
       endpointSecret
     );
+    console.log("Constructed event:", event);
   } catch (err) {
     console.error("Webhook Error:", err.message);
     return response.status(400).send(`Webhook Error: ${err.message}`);
   }
   //console.log(event);
 
-  console.log(event);
-  console.log(
-    "---------------------------------------------------------------------------------"
-  );
+  console.log("Received event type:", event.type);
+  console.log("Event data:", event.data.object);
+
   try {
     switch (event.type) {
       case "payment_intent.succeeded":
+        console.log("Handling payment_intent.succeeded event");
         const session = event.data.object;
         const customData = session.metadata;
-        //console.log("session",session);
-        // console.log("customData",customData);
-        console.log("**", customData, "*");
-        // Access user schema and retrieve pendingPayments
+        console.log("Session metadata:", customData);
+
         const user = await User.findById(customData.paidBy);
-        const value = user.pendingPayments.get(customData.key);
-
-        // Delete the key from pendingPayments map
-
-        user.pendingPayments.delete(customData.key);
-
-        // Update user's pendingPayments
-
-        await user.save();
-
-        // Access AvailableRide schema and retrieve paidTo data
-        const availableRide = await AvailableRide.findById(value.rideId);
-
-        if (!availableRide) {
-          console.error("Available ride not found");
+        if (!user) {
+          console.error("User not found for ID:", customData.paidBy);
           break;
         }
+        console.log("User found:", user);
 
-        const paidTo = availableRide.driverId;
+        const value = user.pendingPayments.get(customData.key);
+        if (!value) {
+          console.error("Pending payment not found for key:", customData.key);
+          break;
+        }
+        console.log("Pending payment value:", value);
 
-        // Subtract booked seats from available seats
+        user.pendingPayments.delete(customData.key);
+        await user.save();
+        console.log("User pendingPayments updated successfully");
+
+        const availableRide = await AvailableRide.findById(value.rideId);
+        if (!availableRide) {
+          console.error("Available ride not found for ID:", value.rideId);
+          break;
+        }
+        console.log("Available ride found:", availableRide);
+
         availableRide.availableSeats -= value.seats;
-
-        // Save the updated document
         await availableRide.save();
+        console.log("Available ride seats updated successfully");
 
-        // Find driver details
         const driver = await User.findById(availableRide.driverId);
+        if (!driver) {
+          console.error("Driver not found for ID:", availableRide.driverId);
+          break;
+        }
+        console.log("Driver found:", driver);
 
-        // Store transaction data in Transaction schema
         const transaction = new Transaction({
           intentId: session.id,
           paidBy: customData.paidBy,
-          paidTo: paidTo,
+          paidTo: availableRide.driverId,
           amountPaid: session.amount / 100,
           unitCost: value.unitCost,
           distance: value.distance,
@@ -144,8 +149,8 @@ const paymentWebhook = async (request, response) => {
           latest_charge: session.latest_charge,
         });
         await transaction.save();
+        console.log("Transaction saved successfully:", transaction);
 
-        // Create past ride entry for the passenger
         const pastRide = new PastRide({
           rideId: value.rideId,
           userId: customData.paidBy,
@@ -153,13 +158,13 @@ const paymentWebhook = async (request, response) => {
           destination: value.destinationAddress,
           user: "passenger",
           rating: {},
-          overview_polyline: availableRide.overview_polyline, // Ensure overview_polyline exists
+          overview_polyline: availableRide.overview_polyline,
           sourceCo: value.pickUp,
           destinationCo: value.destination,
         });
         await pastRide.save();
+        console.log("Past ride saved successfully:", pastRide);
 
-        // Create booked ride entry for the passenger
         const bookedRide = new BookedRide({
           rideId: value.rideId,
           passengerId: customData.paidBy,
@@ -175,7 +180,7 @@ const paymentWebhook = async (request, response) => {
           transactionId: transaction._id,
           verificationCode: generateUniqueCode(),
           vehicleType: availableRide.vehicleType,
-          overview_polyline: availableRide.overview_polyline, // Ensure overview_polyline exists
+          overview_polyline: availableRide.overview_polyline,
           passengerName: user.name,
           passengerImageUrl: user.imageUrl,
           driverId: availableRide.driverId,
@@ -185,12 +190,12 @@ const paymentWebhook = async (request, response) => {
           driverPastId: availableRide.pastRideId,
         });
         await bookedRide.save();
+        console.log("Booked ride saved successfully:", bookedRide);
 
-        console.log("Transaction stored");
         break;
 
       default:
-        //console.log(Unhandled event type ${event.type});
+        console.log("Unhandled event type:", event.type);
         break;
     }
   } catch (error) {
